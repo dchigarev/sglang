@@ -390,14 +390,16 @@ def _fwd_grouped_kernel_stage1(
             if logit_cap > 0:
                 qk = logit_cap * tanh(qk / logit_cap)
 
-            qk = tl.where(
-                mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk, float("-inf")
-            )
             # ======== STORE TMP_QK =========
             qk_blck_row_idx = grid_idx * QK_BLCK_NROWS * qk_stride_x + tl.arange(0, QK_BLCK_NROWS)[:, None] * qk_stride_x
             qk_blck_col_idx = tl.arange(0, QK_BLCK_NCOLS)[None, :]
 
             tl.store(tmp_qk + qk_blck_row_idx + qk_blck_col_idx, qk.to(tl.bfloat16))
+
+            qk = tl.where(
+                mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk, float("-inf")
+            )
+
         #     # tl.device_print("qk val", qk)
 
             offs_buf_v = (
@@ -621,7 +623,7 @@ def _decode_grouped_att_m_fwd(
     #     pickle.dump(tmp_q.cpu(), f)
     # with open(f"../../dump{IDX}_k.pkl", "wb") as f:
     #     pickle.dump(tmp_k.cpu(), f)
-    with open(f"../../dump{IDX}_qk.pkl", "wb") as f:
+    with open(f"../../dump{IDX}_qk_bw.pkl", "wb") as f:
         pickle.dump(tmp_qk.cpu(), f)
     print("hey")
 
