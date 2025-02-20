@@ -260,6 +260,9 @@ def _fwd_grouped_kernel_stage1(
     tmp_k,
     k_stride_x,
     k_stride_y,
+    tmp_qk,
+    qk_stride_x,
+    qk_stride_y,
     kv_group_num: tl.constexpr,
     q_head_num: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
@@ -282,6 +285,8 @@ def _fwd_grouped_kernel_stage1(
     Q_BLCK_NCOLS : tl.constexpr,
     K_BLCK_NROWS : tl.constexpr,
     K_BLCK_NCOLS : tl.constexpr,
+    QK_BLCK_NROWS : tl.constexpr,
+    QK_BLCK_NCOLS : tl.constexpr,
 ):
     cur_batch = tl.program_id(0) # [0, 1]
     cur_head_id = tl.program_id(1) # [0]
@@ -354,19 +359,24 @@ def _fwd_grouped_kernel_stage1(
                 other=0.0,
             )
             # tl.device_print("row_idx", k)
-            # ======== STORE TMP_Q =========
-            q_blck_row_idx = grid_idx * Q_BLCK_NROWS * q_stride_x + tl.arange(0, Q_BLCK_NROWS)[:, None] * q_stride_x
-            q_blck_col_idx = tl.arange(0, Q_BLCK_NCOLS)[None, :]
+            # # ======== STORE TMP_Q =========
+            # q_blck_row_idx = grid_idx * Q_BLCK_NROWS * q_stride_x + tl.arange(0, Q_BLCK_NROWS)[:, None] * q_stride_x
+            # q_blck_col_idx = tl.arange(0, Q_BLCK_NCOLS)[None, :]
 
-            tl.store(tmp_q + q_blck_row_idx + q_blck_col_idx, q.to(tl.bfloat16))
+            # tl.store(tmp_q + q_blck_row_idx + q_blck_col_idx, q.to(tl.bfloat16))
 
             # ======== STORE TMP_K =========
-            k_blck_row_idx = grid_idx * K_BLCK_NROWS * k_stride_x + tl.arange(0, K_BLCK_NROWS)[:, None] * k_stride_x
-            k_blck_col_idx = tl.arange(0, K_BLCK_NCOLS)[None, :]
+            # k_blck_row_idx = grid_idx * K_BLCK_NROWS * k_stride_x + tl.arange(0, K_BLCK_NROWS)[:, None] * k_stride_x
+            # k_blck_col_idx = tl.arange(0, K_BLCK_NCOLS)[None, :]
 
-            tl.store(tmp_k + k_blck_row_idx + k_blck_col_idx, k.to(tl.bfloat16))
+            # tl.store(tmp_k + k_blck_row_idx + k_blck_col_idx, k.to(tl.bfloat16))
 
             qk = tl.dot(q, k.to(q.dtype))
+            # ======== STORE TMP_QK =========
+            qk_blck_row_idx = grid_idx * QK_BLCK_NROWS * qk_stride_x + tl.arange(0, QK_BLCK_NROWS)[:, None] * qk_stride_x
+            qk_blck_col_idx = tl.arange(0, QK_BLCK_NCOLS)[None, :]
+
+            tl.store(tmp_qk + qk_blck_row_idx + qk_blck_col_idx, qk.to(tl.bfloat16))
             if BLOCK_DPE > 0:
                 offs_buf_kpe = (
                     kv_loc[None, :] * stride_buf_kbs
@@ -410,10 +420,10 @@ def _fwd_grouped_kernel_stage1(
             # sample_p = tl.full(shape=(P_BLCK_NROWS, P_BLCK_NCOLS), value=grid_idx, dtype=tl.bfloat16)
 
             # ======== STORE TMP_P =========
-            p_blck_row_idx = grid_idx * P_BLCK_NROWS * stride_x + tl.arange(0, P_BLCK_NROWS)[:, None] * stride_x
-            p_blck_col_idx = tl.arange(0, P_BLCK_NCOLS)[None, :]
+            # p_blck_row_idx = grid_idx * P_BLCK_NROWS * stride_x + tl.arange(0, P_BLCK_NROWS)[:, None] * stride_x
+            # p_blck_col_idx = tl.arange(0, P_BLCK_NCOLS)[None, :]
 
-            tl.store(tmp_p + p_blck_row_idx + p_blck_col_idx, p.to(tl.bfloat16))
+            # tl.store(tmp_p + p_blck_row_idx + p_blck_col_idx, p.to(tl.bfloat16))
 
             # ======== STORE TMP_V =========
             # v_blck_row_idx = grid_idx * V_BLCK_NROWS * v_stride_x + tl.arange(0, V_BLCK_NROWS)[:, None] * v_stride_x
@@ -532,6 +542,12 @@ def _decode_grouped_att_m_fwd(
     K_BLCK_NROWS = 64
     K_BLCK_NCOLS = 32
     tmp_k = torch.full((grid[0] * grid[1] * grid[2] * K_BLCK_NROWS, K_BLCK_NCOLS), -1, dtype=torch.bfloat16, device=DEVICE)
+
+    # ===== DEFINE TMP_QK =========
+    QK_BLCK_NROWS = 16
+    QK_BLCK_NCOLS = 32
+    tmp_qk = torch.full((grid[0] * grid[1] * grid[2] * QK_BLCK_NROWS, QK_BLCK_NCOLS), -1, dtype=torch.bfloat16, device=DEVICE)
+
     # breakpoint()
     _fwd_grouped_kernel_stage1[grid](
         q,
@@ -562,6 +578,9 @@ def _decode_grouped_att_m_fwd(
         tmp_k,
         tmp_k.stride(0),
         tmp_k.stride(1),
+        tmp_qk,
+        tmp_qk.stride(0),
+        tmp_qk.stride(1),
         kv_group_num=kv_group_num,
         q_head_num=head_num,
         BLOCK_DMODEL=BLOCK_DMODEL,
@@ -586,19 +605,23 @@ def _decode_grouped_att_m_fwd(
         Q_BLCK_NCOLS=Q_BLCK_NCOLS,
         K_BLCK_NROWS=K_BLCK_NROWS,
         K_BLCK_NCOLS=K_BLCK_NCOLS,
+        QK_BLCK_NROWS=QK_BLCK_NROWS,
+        QK_BLCK_NCOLS=QK_BLCK_NCOLS,
         **extra_kargs,
     )
     print(tmp_p)
     # breakpoint()
     IDX = 1 if DEVICE == "cuda" else 2
-    with open(f"../../dump{IDX}_p.pkl", "wb") as f:
-        pickle.dump(tmp_p.cpu(), f)
-    with open(f"../../dump{IDX}_v.pkl", "wb") as f:
-        pickle.dump(tmp_v.cpu(), f)
-    with open(f"../../dump{IDX}_q_dbg.pkl", "wb") as f:
-        pickle.dump(tmp_q.cpu(), f)
-    with open(f"../../dump{IDX}_k.pkl", "wb") as f:
-        pickle.dump(tmp_k.cpu(), f)
+    # with open(f"../../dump{IDX}_p.pkl", "wb") as f:
+    #     pickle.dump(tmp_p.cpu(), f)
+    # with open(f"../../dump{IDX}_v.pkl", "wb") as f:
+    #     pickle.dump(tmp_v.cpu(), f)
+    # with open(f"../../dump{IDX}_q_dbg.pkl", "wb") as f:
+    #     pickle.dump(tmp_q.cpu(), f)
+    # with open(f"../../dump{IDX}_k.pkl", "wb") as f:
+    #     pickle.dump(tmp_k.cpu(), f)
+    with open(f"../../dump{IDX}_qk.pkl", "wb") as f:
+        pickle.dump(tmp_qk.cpu(), f)
     print("hey")
 
 
