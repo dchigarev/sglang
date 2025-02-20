@@ -372,11 +372,7 @@ def _fwd_grouped_kernel_stage1(
             # tl.store(tmp_k + k_blck_row_idx + k_blck_col_idx, k.to(tl.bfloat16))
 
             qk = tl.dot(q, k.to(q.dtype))
-            # ======== STORE TMP_QK =========
-            qk_blck_row_idx = grid_idx * QK_BLCK_NROWS * qk_stride_x + tl.arange(0, QK_BLCK_NROWS)[:, None] * qk_stride_x
-            qk_blck_col_idx = tl.arange(0, QK_BLCK_NCOLS)[None, :]
 
-            tl.store(tmp_qk + qk_blck_row_idx + qk_blck_col_idx, qk.to(tl.bfloat16))
             if BLOCK_DPE > 0:
                 offs_buf_kpe = (
                     kv_loc[None, :] * stride_buf_kbs
@@ -397,6 +393,11 @@ def _fwd_grouped_kernel_stage1(
             qk = tl.where(
                 mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk, float("-inf")
             )
+            # ======== STORE TMP_QK =========
+            qk_blck_row_idx = grid_idx * QK_BLCK_NROWS * qk_stride_x + tl.arange(0, QK_BLCK_NROWS)[:, None] * qk_stride_x
+            qk_blck_col_idx = tl.arange(0, QK_BLCK_NCOLS)[None, :]
+
+            tl.store(tmp_qk + qk_blck_row_idx + qk_blck_col_idx, qk.to(tl.bfloat16))
         #     # tl.device_print("qk val", qk)
 
             offs_buf_v = (
