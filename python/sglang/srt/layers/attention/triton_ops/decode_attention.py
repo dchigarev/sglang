@@ -305,7 +305,7 @@ def _fwd_grouped_kernel_stage1(
     cur_batch_seq_len = tl.load(kv_indptr + cur_batch + 1) - cur_batch_kv_start_idx # 5 always
 
     offs_q = cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[None, :]
-    q = tl.load(Q + offs_q)
+    q = tl.load(Q + offs_q, mask=(mask_h[:, None]) & (mask_d[None, :]), other=0.0)
 
     if BLOCK_DPE > 0:
         offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
@@ -387,7 +387,7 @@ def _fwd_grouped_kernel_stage1(
             qk = tl.where(
                 mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk, float("-inf")
             )
-            # tl.device_print("qk val", qk)
+        #     # tl.device_print("qk val", qk)
 
             offs_buf_v = (
                 kv_loc[:, None] * stride_buf_vbs
@@ -416,10 +416,10 @@ def _fwd_grouped_kernel_stage1(
             tl.store(tmp_p + p_blck_row_idx + p_blck_col_idx, p.to(tl.bfloat16))
 
             # ======== STORE TMP_V =========
-            v_blck_row_idx = grid_idx * V_BLCK_NROWS * v_stride_x + tl.arange(0, V_BLCK_NROWS)[:, None] * v_stride_x
-            v_blck_col_idx = tl.arange(0, V_BLCK_NCOLS)[None, :]
+            # v_blck_row_idx = grid_idx * V_BLCK_NROWS * v_stride_x + tl.arange(0, V_BLCK_NROWS)[:, None] * v_stride_x
+            # v_blck_col_idx = tl.arange(0, V_BLCK_NCOLS)[None, :]
 
-            tl.store(tmp_v + v_blck_row_idx + v_blck_col_idx, v.to(tl.bfloat16))
+            # tl.store(tmp_v + v_blck_row_idx + v_blck_col_idx, v.to(tl.bfloat16))
 
             acc *= re_scale[:, None]
             te = tl.dot(p.to(v.dtype), v)
@@ -532,7 +532,7 @@ def _decode_grouped_att_m_fwd(
     K_BLCK_NROWS = 64
     K_BLCK_NCOLS = 32
     tmp_k = torch.full((grid[0] * grid[1] * grid[2] * K_BLCK_NROWS, K_BLCK_NCOLS), -1, dtype=torch.bfloat16, device=DEVICE)
-
+    # breakpoint()
     _fwd_grouped_kernel_stage1[grid](
         q,
         k_buffer,
@@ -595,7 +595,7 @@ def _decode_grouped_att_m_fwd(
         pickle.dump(tmp_p.cpu(), f)
     with open(f"../../dump{IDX}_v.pkl", "wb") as f:
         pickle.dump(tmp_v.cpu(), f)
-    with open(f"../../dump{IDX}_q_wo_mask.pkl", "wb") as f:
+    with open(f"../../dump{IDX}_q_dbg.pkl", "wb") as f:
         pickle.dump(tmp_q.cpu(), f)
     with open(f"../../dump{IDX}_k.pkl", "wb") as f:
         pickle.dump(tmp_k.cpu(), f)
