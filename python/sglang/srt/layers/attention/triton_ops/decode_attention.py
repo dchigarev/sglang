@@ -248,6 +248,10 @@ def _fwd_grouped_kernel_stage1(
     stride_mid_ob,
     stride_mid_oh,
     stride_mid_os,
+    tmp_p,
+    tmp_v,
+    stride_x,
+    stride_y,
     kv_group_num: tl.constexpr,
     q_head_num: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
@@ -259,6 +263,11 @@ def _fwd_grouped_kernel_stage1(
     logit_cap: tl.constexpr,
     Lk: tl.constexpr,
     Lv: tl.constexpr,
+    BX : tl.constexpr,
+    BY : tl.constexpr,
+    BZ : tl.constexpr,
+    P_BLCK_NROWS : tl.constexpr,
+    P_BLCK_NCOLS : tl.constexpr,
 ):
     cur_batch = tl.program_id(0) # [0, 1]
     cur_head_id = tl.program_id(1) # [0]
@@ -347,27 +356,41 @@ def _fwd_grouped_kernel_stage1(
             qk = tl.where(
                 mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk, float("-inf")
             )
+            # tl.device_print("qk val", qk)
 
             offs_buf_v = (
                 kv_loc[:, None] * stride_buf_vbs
                 + cur_kv_head * stride_buf_vh
                 + offs_dv[None, :]
             )
+            # tl.device_print("idx", offs_buf_v)
             v = tl.load(
                 V_Buffer + offs_buf_v,
                 mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
                 other=0.0,
             )
-
+            
             n_e_max = tl.maximum(tl.max(qk, 1), e_max)
+            
             re_scale = tl.exp(e_max - n_e_max)
             p = tl.exp(qk - n_e_max[:, None])
+            # tl.device_print("qk val", v)
             
+            bx = tl.program_id(0)  # X grid index
+            by = tl.program_id(1)  # Y grid index
+            bz = tl.program_id(2)  # Z grid index
+
+            grid_idx = bx * (BY + 1) * (BZ + 1) + by * (BZ + 1) + bz
+            # sample_p = tl.full(shape=(P_BLCK_NROWS, P_BLCK_NCOLS), value=grid_idx, dtype=tl.bfloat16, stride_y=1)
+            p_blck_row_idx = grid_idx * P_BLCK_NROWS + tl.arange(0, P_BLCK_NROWS)[:, None]
+            p_blck_col_idx = tl.arange(0, P_BLCK_NCOLS)[None, :]
+
+            tl.store(tmp_p + p_blck_row_idx + p_blck_col_idx, sample_p)# p.to(tl.bfloat16))
 
             acc *= re_scale[:, None]
-            # tl.device_print("qk val", p)
+            res_mask = ((offs_n[:, None] < split_kv_end) & (mask_dv[None, :])) + 2
+            # tl.device_print("qk val", res_mask)
             te = tl.dot(p.to(v.dtype), v)
-            
             acc += te
 
             e_sum = e_sum * re_scale + tl.sum(p, 1)
@@ -399,6 +422,7 @@ def _fwd_grouped_kernel_stage1(
             mask=mask_h,
         )
 
+import torch
 
 def _decode_grouped_att_m_fwd(
     q,
@@ -452,6 +476,11 @@ def _decode_grouped_att_m_fwd(
         extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
         num_stages = 1
 
+    P_BLCK_NROWS = 16
+    P_BLCK_NCOLS = 32
+    # torch.full((size,), -1, dtype=torch.float32, device='cuda')
+    tmp_p = torch.full((grid[0] * grid[1] * grid[2] * P_BLCK_NROWS, P_BLCK_NCOLS), -1, dtype=torch.bfloat16, device="cuda")
+
     _fwd_grouped_kernel_stage1[grid](
         q,
         k_buffer,
@@ -469,6 +498,9 @@ def _decode_grouped_att_m_fwd(
         att_out.stride(0),
         att_out.stride(1),
         att_out.stride(2),
+        tmp_p,
+        tmp_p.stride(0),
+        tmp_p.stride(1),
         kv_group_num=kv_group_num,
         q_head_num=head_num,
         BLOCK_DMODEL=BLOCK_DMODEL,
@@ -482,8 +514,18 @@ def _decode_grouped_att_m_fwd(
         num_stages=num_stages,
         Lk=Lk,
         Lv=Lv,
+        BX=grid[0],
+        BY=grid[1],
+        BZ=grid[2],
+        P_BLCK_NROWS=P_BLCK_NROWS,
+        P_BLCK_NCOLS=P_BLCK_NCOLS,
         **extra_kargs,
     )
+    print(tmp_p)
+    breakpoint()
+    with open("../../dump1_p.pkl", "wb") as f:
+        pickle.dump(tmp_p.cpu(), f)
+    print("hey")
 
 
 @triton.jit

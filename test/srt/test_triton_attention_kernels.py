@@ -16,7 +16,7 @@ from sglang.srt.layers.attention.triton_ops.prefill_attention import (
     context_attention_fwd,
 )
 
-DEVICE = "xpu"
+DEVICE = os.environ.get("SRT_DEVICE", "cuda")
 
 class TestTritonAttention(unittest.TestCase):
 
@@ -351,12 +351,12 @@ class TestTritonAttention(unittest.TestCase):
     def test_grouped_decode_attention(self):
         seq_lens = [5]#, 100, 128, 500]
         configs = [
-            # (2, 16, 16, 64, 64),
-            (2, 16, 1, 64, 64),
+            (2, 16, 16, 64, 64),
+            # (2, 16, 1, 64, 64),
             # (2, 64, 1, 13, 13),
-            #(2, 128, 1, 80, 80),
-            #(2, 128, 2, 512, 512),
-            #(2, 128, 1, 576, 512),
+            # (2, 128, 1, 80, 80),
+            # (2, 128, 2, 512, 512),
+            # (2, 128, 1, 576, 512),
         ]
 
         for S in seq_lens:
@@ -372,12 +372,13 @@ class TestTritonAttention(unittest.TestCase):
 import triton
 if __name__ == "__main__":
     # unittest.main()
-    def exit_hook(lazy_dict: triton.compiler.LazyDict):
-        # Need this for xpu device to capture print results before child process exit
-        # torch.xpu.synchronize() does not work because it just sync on reserved stream
-        triton.runtime.driver.active.utils.wait()
+    if DEVICE == "xpu":
+        def exit_hook(lazy_dict: triton.compiler.LazyDict):
+            # Need this for xpu device to capture print results before child process exit
+            # torch.xpu.synchronize() does not work because it just sync on reserved stream
+            triton.runtime.driver.active.utils.wait()
 
-    triton.compiler.CompiledKernel.launch_exit_hook = exit_hook
+        triton.compiler.CompiledKernel.launch_exit_hook = exit_hook
     # TestTritonAttention().test_grouped_decode_attention()
     
     suite = unittest.TestSuite()
@@ -385,4 +386,5 @@ if __name__ == "__main__":
 
     runner = unittest.TextTestRunner()
     runner.run(suite)
-    getattr(torch, DEVICE).synchronize()
+    if DEVICE == "xpu":
+        getattr(torch, DEVICE).synchronize()
