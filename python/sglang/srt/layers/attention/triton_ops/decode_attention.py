@@ -487,14 +487,17 @@ def _decode_grouped_att_m_fwd(
         extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
         num_stages = 1
 
+    import os
+    DEVICE = os.environ.get("SRT_DEVICE", "cuda")
+
     P_BLCK_NROWS = 16
     P_BLCK_NCOLS = 32
     # torch.full((size,), -1, dtype=torch.float32, device='cuda')
-    tmp_p = torch.full((grid[0] * grid[1] * grid[2] * P_BLCK_NROWS, P_BLCK_NCOLS), -1, dtype=torch.bfloat16, device="cuda")
+    tmp_p = torch.full((grid[0] * grid[1] * grid[2] * P_BLCK_NROWS, P_BLCK_NCOLS), -1, dtype=torch.bfloat16, device=DEVICE)
 
     V_BLCK_NROWS = 32
     V_BLCK_NCOLS = 64
-    tmp_v = torch.full((grid[0] * grid[1] * grid[2] * P_BLCK_NROWS, P_BLCK_NCOLS), -1, dtype=torch.bfloat16, device="cuda")
+    tmp_v = torch.full((grid[0] * grid[1] * grid[2] * P_BLCK_NROWS, P_BLCK_NCOLS), -1, dtype=torch.bfloat16, device=DEVICE)
 
     _fwd_grouped_kernel_stage1[grid](
         q,
