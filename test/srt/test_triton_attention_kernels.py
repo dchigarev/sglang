@@ -15,7 +15,7 @@ from sglang.srt.layers.attention.triton_ops.extend_attention import (
 from sglang.srt.layers.attention.triton_ops.prefill_attention import (
     context_attention_fwd,
 )
-
+import os
 DEVICE = os.environ.get("SRT_DEVICE", "cuda")
 
 class TestTritonAttention(unittest.TestCase):
@@ -351,8 +351,8 @@ class TestTritonAttention(unittest.TestCase):
     def test_grouped_decode_attention(self):
         seq_lens = [5]#, 100, 128, 500]
         configs = [
-            (2, 16, 16, 64, 64),
-            # (2, 16, 1, 64, 64),
+            # (2, 16, 16, 64, 64),
+            (2, 16, 1, 64, 64),
             # (2, 64, 1, 13, 13),
             # (2, 128, 1, 80, 80),
             # (2, 128, 2, 512, 512),
@@ -362,12 +362,12 @@ class TestTritonAttention(unittest.TestCase):
         for S in seq_lens:
             for B, H_Q, H_KV, D, D_V in configs:
                 print(f"seq_len={S}, ({B=}, {H_Q=}, {H_KV=}, {D=}, {D_V=})")
-                try:
-                    self._test_grouped_decode_attention_once(B, S, H_Q, H_KV, D, D_V)
-                except Exception as e:
-                    print(f"FALIED: {e}")
-                else:
-                    print("OK")
+                # try:
+                self._test_grouped_decode_attention_once(B, S, H_Q, H_KV, D, D_V)
+                # except Exception as e:
+                    # print(f"FALIED: {e}")
+                # else:
+                    # print("OK")
 
 import triton
 if __name__ == "__main__":

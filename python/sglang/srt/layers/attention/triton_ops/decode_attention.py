@@ -230,7 +230,7 @@ def _decode_att_m_fwd(
         Lv=Lv,
     )
 
-@triton.jit(debug=True)
+@triton.jit
 def _fwd_grouped_kernel_stage1(
     Q,
     K_Buffer,
@@ -249,9 +249,11 @@ def _fwd_grouped_kernel_stage1(
     stride_mid_oh,
     stride_mid_os,
     tmp_p,
-    tmp_v,
     stride_x,
     stride_y,
+    tmp_v,
+    v_stride_x,
+    v_stride_y,
     kv_group_num: tl.constexpr,
     q_head_num: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
@@ -268,6 +270,8 @@ def _fwd_grouped_kernel_stage1(
     BZ : tl.constexpr,
     P_BLCK_NROWS : tl.constexpr,
     P_BLCK_NCOLS : tl.constexpr,
+    V_BLCK_NROWS : tl.constexpr,
+    V_BLCK_NCOLS : tl.constexpr,
 ):
     cur_batch = tl.program_id(0) # [0, 1]
     cur_head_id = tl.program_id(1) # [0]
@@ -380,16 +384,22 @@ def _fwd_grouped_kernel_stage1(
             by = tl.program_id(1)  # Y grid index
             bz = tl.program_id(2)  # Z grid index
 
-            grid_idx = bx * (BY + 1) * (BZ + 1) + by * (BZ + 1) + bz
-            # sample_p = tl.full(shape=(P_BLCK_NROWS, P_BLCK_NCOLS), value=grid_idx, dtype=tl.bfloat16, stride_y=1)
-            p_blck_row_idx = grid_idx * P_BLCK_NROWS + tl.arange(0, P_BLCK_NROWS)[:, None]
+            grid_idx = bx * (BY) * (BZ) + by * (BZ) + bz
+            # sample_p = tl.full(shape=(P_BLCK_NROWS, P_BLCK_NCOLS), value=grid_idx, dtype=tl.bfloat16)
+
+            # ======== STORE TMP_P =========
+            p_blck_row_idx = grid_idx * P_BLCK_NROWS * stride_x + tl.arange(0, P_BLCK_NROWS)[:, None] * stride_x
             p_blck_col_idx = tl.arange(0, P_BLCK_NCOLS)[None, :]
 
-            tl.store(tmp_p + p_blck_row_idx + p_blck_col_idx, sample_p)# p.to(tl.bfloat16))
+            tl.store(tmp_p + p_blck_row_idx + p_blck_col_idx, p.to(tl.bfloat16))
+
+            # ======== STORE TMP_V =========
+            v_blck_row_idx = grid_idx * V_BLCK_NROWS * v_stride_x + tl.arange(0, V_BLCK_NROWS)[:, None] * v_stride_x
+            v_blck_col_idx = tl.arange(0, V_BLCK_NCOLS)[None, :]
+
+            tl.store(tmp_v + v_blck_row_idx + v_blck_col_idx, v.to(tl.bfloat16))
 
             acc *= re_scale[:, None]
-            res_mask = ((offs_n[:, None] < split_kv_end) & (mask_dv[None, :])) + 2
-            # tl.device_print("qk val", res_mask)
             te = tl.dot(p.to(v.dtype), v)
             acc += te
 
@@ -423,6 +433,7 @@ def _fwd_grouped_kernel_stage1(
         )
 
 import torch
+import pickle
 
 def _decode_grouped_att_m_fwd(
     q,
@@ -481,6 +492,10 @@ def _decode_grouped_att_m_fwd(
     # torch.full((size,), -1, dtype=torch.float32, device='cuda')
     tmp_p = torch.full((grid[0] * grid[1] * grid[2] * P_BLCK_NROWS, P_BLCK_NCOLS), -1, dtype=torch.bfloat16, device="cuda")
 
+    V_BLCK_NROWS = 32
+    V_BLCK_NCOLS = 64
+    tmp_v = torch.full((grid[0] * grid[1] * grid[2] * P_BLCK_NROWS, P_BLCK_NCOLS), -1, dtype=torch.bfloat16, device="cuda")
+
     _fwd_grouped_kernel_stage1[grid](
         q,
         k_buffer,
@@ -501,6 +516,9 @@ def _decode_grouped_att_m_fwd(
         tmp_p,
         tmp_p.stride(0),
         tmp_p.stride(1),
+        tmp_v,
+        tmp_v.stride(0),
+        tmp_v.stride(1),
         kv_group_num=kv_group_num,
         q_head_num=head_num,
         BLOCK_DMODEL=BLOCK_DMODEL,
@@ -519,12 +537,16 @@ def _decode_grouped_att_m_fwd(
         BZ=grid[2],
         P_BLCK_NROWS=P_BLCK_NROWS,
         P_BLCK_NCOLS=P_BLCK_NCOLS,
+        V_BLCK_NROWS=V_BLCK_NROWS,
+        V_BLCK_NCOLS=V_BLCK_NCOLS,
         **extra_kargs,
     )
     print(tmp_p)
-    breakpoint()
+    # breakpoint()
     with open("../../dump1_p.pkl", "wb") as f:
         pickle.dump(tmp_p.cpu(), f)
+    with open("../../dump1_v.pkl", "wb") as f:
+        pickle.dump(tmp_v.cpu(), f)
     print("hey")
 
 
