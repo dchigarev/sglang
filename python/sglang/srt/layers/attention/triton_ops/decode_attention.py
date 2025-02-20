@@ -29,12 +29,12 @@ from sglang.srt.utils import is_hip
 
 is_hip_ = is_hip()
 
-logger = logging.getLogger(__name__)
+# logger = logging.getLogger(__name__)
 
-# TODO: Remove this when triton>=3.2.0. This issue will not affect performance and accuracy.
-logger.warning(
-    "The following error message 'operation scheduled before its operands' can be ignored."
-)
+# # TODO: Remove this when triton>=3.2.0. This issue will not affect performance and accuracy.
+# logger.warning(
+#     "The following error message 'operation scheduled before its operands' can be ignored."
+# )
 
 
 @triton.jit
@@ -75,7 +75,6 @@ def _fwd_kernel_stage1(
     split_kv_id = tl.program_id(2)
 
     cur_kv_head = cur_head // kv_group_num
-
     offs_d = tl.arange(0, BLOCK_DMODEL)
     offs_dv = tl.arange(0, BLOCK_DV)
     mask_d = offs_d < Lk
@@ -137,6 +136,7 @@ def _fwd_kernel_stage1(
             p = tl.exp(qk - n_e_max)
             acc *= re_scale
             acc += tl.sum(p[:, None] * v, 0)
+            # acc
 
             e_sum = e_sum * re_scale + tl.sum(p, 0)
             e_max = n_e_max
@@ -230,18 +230,17 @@ def _decode_att_m_fwd(
         Lv=Lv,
     )
 
-
-@triton.jit
+@triton.jit(debug=True)
 def _fwd_grouped_kernel_stage1(
     Q,
     K_Buffer,
     V_Buffer,
     sm_scale,
-    kv_indptr,
-    kv_indices,
+    kv_indptr, # tensor([ 0,  5, 10], device='xpu:0', dtype=torch.int32)
+    kv_indices, # tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], device='xpu:0')
     Att_Out,
-    stride_qbs,
-    stride_qh,
+    stride_qbs, # 1024
+    stride_qh, # 64
     stride_buf_kbs,
     stride_buf_kh,
     stride_buf_vbs,
@@ -261,26 +260,26 @@ def _fwd_grouped_kernel_stage1(
     Lk: tl.constexpr,
     Lv: tl.constexpr,
 ):
-    cur_batch = tl.program_id(0)
-    cur_head_id = tl.program_id(1)
-    cur_kv_head = cur_head_id // tl.cdiv(kv_group_num, BLOCK_H)
-    split_kv_id = tl.program_id(2)
+    cur_batch = tl.program_id(0) # [0, 1]
+    cur_head_id = tl.program_id(1) # [0]
+    cur_kv_head = cur_head_id // tl.cdiv(kv_group_num, BLOCK_H) # [0] always
+    split_kv_id = tl.program_id(2) # [0 - 7]
 
-    if BLOCK_H < kv_group_num:
+    if BLOCK_H < kv_group_num: # both are 16
         VALID_BLOCK_H: tl.constexpr = BLOCK_H
     else:
-        VALID_BLOCK_H: tl.constexpr = kv_group_num
-    cur_head = cur_head_id * VALID_BLOCK_H + tl.arange(0, BLOCK_H)
-    mask_h = cur_head < (cur_head_id + 1) * VALID_BLOCK_H
-    mask_h = mask_h & (cur_head < q_head_num)
+        VALID_BLOCK_H: tl.constexpr = kv_group_num # 16 always
+    cur_head = cur_head_id * VALID_BLOCK_H + tl.arange(0, BLOCK_H) # [0..15]
+    mask_h = cur_head < (cur_head_id + 1) * VALID_BLOCK_H # [full True]
+    mask_h = mask_h & (cur_head < q_head_num) # [full True]
 
-    offs_d = tl.arange(0, BLOCK_DMODEL)
-    offs_dv = tl.arange(0, BLOCK_DV)
-    mask_d = offs_d < Lk
-    mask_dv = offs_dv < Lv
+    offs_d = tl.arange(0, BLOCK_DMODEL) # [0..63]
+    offs_dv = tl.arange(0, BLOCK_DV) # [0..63]
+    mask_d = offs_d < Lk # [True] x64
+    mask_dv = offs_dv < Lv # [True] x64
 
-    cur_batch_kv_start_idx = tl.load(kv_indptr + cur_batch)
-    cur_batch_seq_len = tl.load(kv_indptr + cur_batch + 1) - cur_batch_kv_start_idx
+    cur_batch_kv_start_idx = tl.load(kv_indptr + cur_batch) # [0, 5, (10 won't be loaded)]
+    cur_batch_seq_len = tl.load(kv_indptr + cur_batch + 1) - cur_batch_kv_start_idx # 5 always
 
     offs_q = cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[None, :]
     q = tl.load(Q + offs_q, mask=(mask_h[:, None]) & (mask_d[None, :]), other=0.0)
@@ -295,22 +294,28 @@ def _fwd_grouped_kernel_stage1(
             Q + off_qpe, mask=(mask_h[:, None]) & (mask_dpe[None, :]), other=0.0
         )
 
-    kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
-    split_kv_start = kv_len_per_split * split_kv_id
-    split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len)
+    kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS) # 1
+    split_kv_start = kv_len_per_split * split_kv_id # [0 - 7]
+    split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len) # min([1 - 8], 5) | [1, 2, 3, 4, 5, 5, 5, 5]
 
     e_max = tl.zeros([BLOCK_H], dtype=tl.float32) - float("inf")
     e_sum = tl.zeros([BLOCK_H], dtype=tl.float32)
     acc = tl.zeros([BLOCK_H, BLOCK_DV], dtype=tl.float32)
+    # tl.device_print("acc tensor aaa", acc)
 
     if split_kv_end > split_kv_start:
+        # only one iter always
+        # start_n: [0 - 4]
+        # split_kv_end: [1, 2, 3, 4, 5]
+        
         for start_n in range(split_kv_start, split_kv_end, BLOCK_N):
-            offs_n = start_n + tl.arange(0, BLOCK_N)
+            offs_n = start_n + tl.arange(0, BLOCK_N) # [0 - 4] + 32
             kv_loc = tl.load(
                 kv_indices + cur_batch_kv_start_idx + offs_n,
                 mask=offs_n < split_kv_end,
                 other=0,
-            )
+            ) # [0, 5] ???
+            # tl.device_print("kv kv_loc and end", kv_loc)
             offs_buf_k = (
                 kv_loc[None, :] * stride_buf_kbs
                 + cur_kv_head * stride_buf_kh
@@ -357,8 +362,13 @@ def _fwd_grouped_kernel_stage1(
             n_e_max = tl.maximum(tl.max(qk, 1), e_max)
             re_scale = tl.exp(e_max - n_e_max)
             p = tl.exp(qk - n_e_max[:, None])
+            
+
             acc *= re_scale[:, None]
-            acc += tl.dot(p.to(v.dtype), v)
+            # tl.device_print("qk val", p)
+            te = tl.dot(p.to(v.dtype), v)
+            
+            acc += te
 
             e_sum = e_sum * re_scale + tl.sum(p, 1)
             e_max = n_e_max
@@ -404,6 +414,7 @@ def _decode_grouped_att_m_fwd(
     BLOCK = 32
     Lk = k_buffer.shape[-1]
     Lv = v_buffer.shape[-1]
+    # breakpoint()
 
     # [TODO] work around shmem limit on MI3xx
     if is_hip_ and Lk >= 576:
@@ -425,11 +436,13 @@ def _decode_grouped_att_m_fwd(
 
     BLOCK_H = 16
     NUM_KV_SPLITS = num_kv_splits
+    # (2, 1, 8)
     grid = (
         batch,
-        triton.cdiv(head_num, min(BLOCK_H, kv_group_num)),
+        triton.cdiv(head_num, min(BLOCK_H, kv_group_num)), # 16 / 16
         NUM_KV_SPLITS,
     )
+    # breakpoint()
 
     extra_kargs = {}
     num_stages = 2
@@ -593,6 +606,13 @@ def decode_attention_fwd_normal(
         sm_scale,
         logit_cap,
     )
+    # print("NORMAL:")
+    # print(attn_logits)
+    # print(q)
+    # print(o)
+    # print(v_buffer)
+    # print(kv_indptr)
+    # print(num_kv_splits)
     _decode_softmax_reducev_fwd(attn_logits, q, o, v_buffer, kv_indptr, num_kv_splits)
 
 
@@ -619,6 +639,13 @@ def decode_attention_fwd_grouped(
         sm_scale,
         logit_cap,
     )
+    # print("GROUPED:")
+    # print(attn_logits)
+    # print(q)
+    # print(o)
+    # print(v_buffer)
+    # print(kv_indptr)
+    # print(num_kv_splits)
     _decode_softmax_reducev_fwd(attn_logits, q, o, v_buffer, kv_indptr, num_kv_splits)
 
 
