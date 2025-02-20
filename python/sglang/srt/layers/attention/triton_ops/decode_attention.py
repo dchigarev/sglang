@@ -305,7 +305,7 @@ def _fwd_grouped_kernel_stage1(
     cur_batch_seq_len = tl.load(kv_indptr + cur_batch + 1) - cur_batch_kv_start_idx # 5 always
 
     offs_q = cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[None, :]
-    q = tl.load(Q + offs_q, mask=(mask_h[:, None]) & (mask_d[None, :]), other=0.0)
+    q = tl.load(Q + offs_q)
 
     if BLOCK_DPE > 0:
         offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
@@ -595,7 +595,7 @@ def _decode_grouped_att_m_fwd(
         pickle.dump(tmp_p.cpu(), f)
     with open(f"../../dump{IDX}_v.pkl", "wb") as f:
         pickle.dump(tmp_v.cpu(), f)
-    with open(f"../../dump{IDX}_q.pkl", "wb") as f:
+    with open(f"../../dump{IDX}_q_wo_mask.pkl", "wb") as f:
         pickle.dump(tmp_q.cpu(), f)
     with open(f"../../dump{IDX}_k.pkl", "wb") as f:
         pickle.dump(tmp_k.cpu(), f)
