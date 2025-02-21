@@ -312,15 +312,15 @@ def _fwd_grouped_kernel_stage1(
     offs_q = cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[None, :]
     q = tl.load(Q + offs_q, mask=(mask_h[:, None]) & (mask_d[None, :]), other=0.0)
 
-    if BLOCK_DPE > 0:
-        offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
-        mask_dpe = offs_dpe < Lk
-        off_qpe = (
-            cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_dpe[None, :]
-        )
-        qpe = tl.load(
-            Q + off_qpe, mask=(mask_h[:, None]) & (mask_dpe[None, :]), other=0.0
-        )
+    # if BLOCK_DPE > 0:
+    #     offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
+    #     mask_dpe = offs_dpe < Lk
+    #     off_qpe = (
+    #         cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_dpe[None, :]
+    #     )
+    #     qpe = tl.load(
+    #         Q + off_qpe, mask=(mask_h[:, None]) & (mask_dpe[None, :]), other=0.0
+    #     )
 
     kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS) # 1
     split_kv_start = kv_len_per_split * split_kv_id # [0 - 7]
@@ -373,51 +373,53 @@ def _fwd_grouped_kernel_stage1(
 
             qk = tl.dot(q, k.to(q.dtype))
 
-            if BLOCK_DPE > 0:
-                offs_buf_kpe = (
-                    kv_loc[None, :] * stride_buf_kbs
-                    + cur_kv_head * stride_buf_kh
-                    + offs_dpe[:, None]
-                )
-                kpe = tl.load(
-                    K_Buffer + offs_buf_kpe,
-                    mask=(offs_n[None, :] < split_kv_end) & (mask_dpe[:, None]),
-                    other=0.0,
-                )
-                qk += tl.dot(qpe, kpe.to(qpe.dtype))
+            # if BLOCK_DPE > 0:
+            #     offs_buf_kpe = (
+            #         kv_loc[None, :] * stride_buf_kbs
+            #         + cur_kv_head * stride_buf_kh
+            #         + offs_dpe[:, None]
+            #     )
+            #     kpe = tl.load(
+            #         K_Buffer + offs_buf_kpe,
+            #         mask=(offs_n[None, :] < split_kv_end) & (mask_dpe[:, None]),
+            #         other=0.0,
+            #     )
+            #     qk += tl.dot(qpe, kpe.to(qpe.dtype))
             qk *= sm_scale
 
-            if logit_cap > 0:
-                qk = logit_cap * tanh(qk / logit_cap)
+            # if logit_cap > 0:
+            #     qk = logit_cap * tanh(qk / logit_cap)
 
+
+            # offs_n = range([0 - 31])
+            # split_kv_end == 1
+            qk = tl.where(
+                mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk, float("-inf")
+            )
             # ======== STORE TMP_QK =========
             qk_blck_row_idx = grid_idx * QK_BLCK_NROWS * qk_stride_x + tl.arange(0, QK_BLCK_NROWS)[:, None] * qk_stride_x
             qk_blck_col_idx = tl.arange(0, QK_BLCK_NCOLS)[None, :]
 
             tl.store(tmp_qk + qk_blck_row_idx + qk_blck_col_idx, qk.to(tl.bfloat16))
 
-            qk = tl.where(
-                mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk, float("-inf")
-            )
+        # #     # tl.device_print("qk val", qk)
 
-        #     # tl.device_print("qk val", qk)
-
-            offs_buf_v = (
-                kv_loc[:, None] * stride_buf_vbs
-                + cur_kv_head * stride_buf_vh
-                + offs_dv[None, :]
-            )
-            # tl.device_print("idx", offs_buf_v)
-            v = tl.load(
-                V_Buffer + offs_buf_v,
-                mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
-                other=0.0,
-            )
+        #     offs_buf_v = (
+        #         kv_loc[:, None] * stride_buf_vbs
+        #         + cur_kv_head * stride_buf_vh
+        #         + offs_dv[None, :]
+        #     )
+        #     # tl.device_print("idx", offs_buf_v)
+        #     v = tl.load(
+        #         V_Buffer + offs_buf_v,
+        #         mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
+        #         other=0.0,
+        #     )
             
-            n_e_max = tl.maximum(tl.max(qk, 1), e_max)
+        #     n_e_max = tl.maximum(tl.max(qk, 1), e_max)
             
-            re_scale = tl.exp(e_max - n_e_max)
-            p = tl.exp(qk - n_e_max[:, None])
+        #     re_scale = tl.exp(e_max - n_e_max)
+        #     p = tl.exp(qk - n_e_max[:, None])
             # tl.device_print("qk val", v)
             
             # sample_p = tl.full(shape=(P_BLCK_NROWS, P_BLCK_NCOLS), value=grid_idx, dtype=tl.bfloat16)
@@ -434,38 +436,38 @@ def _fwd_grouped_kernel_stage1(
 
             # tl.store(tmp_v + v_blck_row_idx + v_blck_col_idx, v.to(tl.bfloat16))
 
-            acc *= re_scale[:, None]
-            te = tl.dot(p.to(v.dtype), v)
-            acc += te
+        #     acc *= re_scale[:, None]
+        #     te = tl.dot(p.to(v.dtype), v)
+        #     acc += te
 
-            e_sum = e_sum * re_scale + tl.sum(p, 1)
-            e_max = n_e_max
+        #     e_sum = e_sum * re_scale + tl.sum(p, 1)
+        #     e_max = n_e_max
 
-        offs_mid_o = (
-            cur_batch * stride_mid_ob
-            + cur_head[:, None] * stride_mid_oh
-            + split_kv_id * stride_mid_os
-            + offs_dv[None, :]
-        )
+        # offs_mid_o = (
+        #     cur_batch * stride_mid_ob
+        #     + cur_head[:, None] * stride_mid_oh
+        #     + split_kv_id * stride_mid_os
+        #     + offs_dv[None, :]
+        # )
 
-        tl.store(
-            Att_Out + offs_mid_o,
-            acc / e_sum[:, None],
-            mask=(mask_h[:, None]) & (mask_dv[None, :]),
-        )
+        # tl.store(
+        #     Att_Out + offs_mid_o,
+        #     acc / e_sum[:, None],
+        #     mask=(mask_h[:, None]) & (mask_dv[None, :]),
+        # )
 
-        offs_mid_o_1 = (
-            cur_batch * stride_mid_ob
-            + cur_head * stride_mid_oh
-            + split_kv_id * stride_mid_os
-            + Lv
-        )
+        # offs_mid_o_1 = (
+        #     cur_batch * stride_mid_ob
+        #     + cur_head * stride_mid_oh
+        #     + split_kv_id * stride_mid_os
+        #     + Lv
+        # )
 
-        tl.store(
-            Att_Out + offs_mid_o_1,
-            e_max + tl.log(e_sum),
-            mask=mask_h,
-        )
+        # tl.store(
+        #     Att_Out + offs_mid_o_1,
+        #     e_max + tl.log(e_sum),
+        #     mask=mask_h,
+        # )
 
 import torch
 import pickle
@@ -623,7 +625,7 @@ def _decode_grouped_att_m_fwd(
     #     pickle.dump(tmp_q.cpu(), f)
     # with open(f"../../dump{IDX}_k.pkl", "wb") as f:
     #     pickle.dump(tmp_k.cpu(), f)
-    with open(f"../../dump{IDX}_qk_bw.pkl", "wb") as f:
+    with open(f"../../dump{IDX}_qk_min_afw.pkl", "wb") as f:
         pickle.dump(tmp_qk.cpu(), f)
     print("hey")
 
